@@ -64,20 +64,43 @@ desta primeira entrega.
 
 ```
 sql/
-  ddl/       tabelas de apoio (config, controle, log HTTP) + grants
+  ddl/       tabelas de apoio (controle, log HTTP) + grants
   acl/       ACL de rede (DBMS_NETWORK_ACL_ADMIN) para saída HTTPS
   packages/  XXISV_EVT_COMPLIANCE_PKG (spec + body)
   jobs/      DBMS_SCHEDULER (envio + retry)
-  seed/      exemplo de carga da tabela de configuração (sem segredos reais)
+  seed/      valores a cadastrar em FND_LOOKUP_VALUES (sem segredos reais)
 docs/        documentos de origem (Oracle e Compliance) + esta arquitetura
 ```
 
+### Configuração — `FND_LOOKUP_VALUES`
+
+Em vez de uma tabela de configuração própria, o package lê endpoint, ambiente
+e credenciais de `FND_LOOKUP_VALUES` (`LOOKUP_TYPE = 'XXISV_CSF_MULTORG_SIC'`),
+o mesmo já usado no XXISV para `WALLET_PATH`/`WALLET_PASSWORD` — reduz o setup
+a cadastrar linhas na tela padrão de Lookups em vez de mais uma tabela.
+`LOOKUP_CODE` esperados por `get_config_f` (ver `sql/seed/seed_lookup_values.sql`):
+
+| LOOKUP_CODE | Uso |
+|---|---|
+| `AMBIENTE` | `HOMOLOGACAO` / `PRODUCAO` / `QA` — define qual dos 3 endpoints fixos no package (`gc_url_*`) esta instância EBS usa |
+| `CD` | header HTTP `cd` (código da mult-organização) |
+| `HASH` | header HTTP `hash` |
+| `WALLET_PATH` | já cadastrado — reaproveitado |
+| `WALLET_PASSWORD` | já cadastrado — reaproveitado |
+
+As URLs de envio (e, quando existir, de consulta de status) ficam fixas como
+constantes no corpo do package (`gc_url_hml/prod/qa`, `gc_status_url_*`) — não
+há mais uma tabela por ambiente para isso, conforme pedido. Timeouts e
+intervalos de polling (`gc_http_timeout_sec`, `gc_poll_interval_sec`,
+`gc_poll_max_wait_sec`) também são constantes no package.
+
+**ASSUNÇÃO:** os nomes de `LOOKUP_CODE` acima seguem a mesma convenção do
+exemplo fornecido (`WALLET_PATH`, `WALLET_PASSWORD`); ajustar `gc_lk_cd`,
+`gc_lk_hash`, `gc_lk_ambiente` em `xxisv_evt_compliance_pkg.pkb` se os códigos
+já cadastrados forem diferentes.
+
 ### Tabelas de apoio (schema XXISV)
 
-- **XXISV_EVT_CONFIG** — endpoint, credenciais (`cd`/`hash`), wallet TLS e
-  parâmetros de timeout/polling por ambiente (HML/PROD/QA). Guarda segredo
-  (`hash`) em texto — grants devem ficar restritos; considerar
-  criptografia at-rest (`DBMS_CRYPTO`) antes de produção.
 - **XXISV_EVT_CONTROL** — 1 linha por `EVENT_HEADER_ID` processado: status
   local, protocolo, erros, tentativas. É a fonte da verdade para o job de
   retry e para auditoria — as tabelas nativas `CLL_F255_*` não são alteradas.
@@ -86,13 +109,13 @@ docs/        documentos de origem (Oracle e Compliance) + esta arquitetura
 
 ### Package `XXISV_EVT_COMPLIANCE_PKG`
 
-- `PROCESS_PENDING_EVENTS_P(p_env_code)` — varre notificações novas, envia e
-  aguarda o status dentro da mesma chamada (ver "Como funciona a espera pelo
-  status" abaixo).
-- `RETRY_PENDING_EVENTS_P(p_env_code)` — retoma eventos que não resolveram na
-  janela síncrona.
-- `PROCESS_ONE_EVENT_P(p_event_header_id, p_env_code)` — reprocesso manual de
-  um evento específico (testes/homologação).
+- `PROCESS_PENDING_EVENTS_P` — varre notificações novas, envia e aguarda o
+  status dentro da mesma chamada (ver "Como funciona a espera pelo status"
+  abaixo). Sem parâmetros — o ambiente vem da lookup `AMBIENTE`.
+- `RETRY_PENDING_EVENTS_P` — retoma eventos que não resolveram na janela
+  síncrona. Sem parâmetros.
+- `PROCESS_ONE_EVENT_P(p_event_header_id)` — reprocesso manual de um evento
+  específico (testes/homologação).
 
 ## Como funciona a espera pelo status
 
@@ -118,7 +141,7 @@ aprovação da SEFAZ. A solução implementada:
 
 1. **Endpoint de consulta de status — bloqueante.** O leiaute v1.2 só
    documenta o `POST` de envio. `poll_event_status_f` está implementada
-   contra `XXISV_EVT_CONFIG.STATUS_ENDPOINT_URL` (hoje `NULL`/placeholder) com
+   contra `gc_status_url_*` (hoje `NULL`/placeholder no package) com
    um contrato de resposta assumido:
    ```json
    { "status": "APPROVED|CANCELLED|ERROR|IN_PROCESS",
@@ -154,17 +177,24 @@ aprovação da SEFAZ. A solução implementada:
 8. **Modelo do documento (`modelo`).** Não há coluna própria mapeada; é
    derivado das posições 21-22 da chave de acesso (`FD_KEY`), com fallback
    `'55'`.
+9. **`LOOKUP_CODE` de CD/HASH/AMBIENTE em `FND_LOOKUP_VALUES`.** Nomeados por
+   convenção (`CD`, `HASH`, `AMBIENTE`), a partir do padrão já usado para
+   `WALLET_PATH`/`WALLET_PASSWORD` — confirmar se os códigos reais já
+   cadastrados no `LOOKUP_TYPE XXISV_CSF_MULTORG_SIC` são esses mesmos.
 
 ## Pré-requisitos de infraestrutura
 
-- Deploy, nesta ordem: `sql/ddl/01..03` (tabelas), `sql/ddl/04_grants.sql`,
+- Deploy, nesta ordem: `sql/ddl/01_xxisv_evt_control.sql`,
+  `sql/ddl/02_xxisv_evt_http_log.sql`, `sql/ddl/03_grants.sql`,
   `sql/acl/01_setup_network_acl.sql`, `sql/packages/*.pks` depois `*.pkb`,
-  `sql/seed/seed_config_example.sql` (com credenciais reais, fora do
-  controle de versão), `sql/jobs/setup_scheduler_jobs.sql`.
+  cadastro dos `LOOKUP_CODE` de `sql/seed/seed_lookup_values.sql` (com `CD`/
+  `HASH` reais, preferencialmente pela tela de Lookups do EBS), e por fim
+  `sql/jobs/setup_scheduler_jobs.sql`.
 - Oracle Wallet configurado para TLS de saída se os certificados dos hosts
   `*.compliancefiscal.com.br` não estiverem na cadeia de confiança padrão do
-  banco.
-- Usuário de integração `XXISV` com os grants de `sql/ddl/04_grants.sql` —
+  banco (caminho/senha lidos de `WALLET_PATH`/`WALLET_PASSWORD` na mesma
+  lookup).
+- Usuário de integração `XXISV` com os grants de `sql/ddl/03_grants.sql` —
   manter o princípio de menor privilégio (somente SELECT nas views e EXECUTE
   no `CLL_F255_RT_EVENTS_PUB`, sem DML nas tabelas nativas da Localização).
 - Jobs `XXISV_EVT_SEND_JOB` / `XXISV_EVT_RETRY_JOB` ficam `enabled => FALSE`

@@ -6,6 +6,54 @@ IS
   g_http_proxy CONSTANT VARCHAR2(200) := NULL;
 
   -- --------------------------------------------------------------------------
+  -- Configuração via FND_LOOKUP_VALUES (LOOKUP_TYPE já usado no XXISV para
+  -- WALLET_PATH/WALLET_PASSWORD). ASSUNÇÃO: os LOOKUP_CODE abaixo (CD, HASH,
+  -- AMBIENTE) seguem a mesma convenção — ajustar para os códigos reais
+  -- cadastrados, se forem diferentes.
+  --
+  -- AMBIENTE indica, nesta instância EBS, qual dos 3 ambientes da Compliance
+  -- deve ser usado (uma instância EBS fala com um único ambiente Compliance).
+  -- As URLs em si ficam fixas aqui no package (pedido explícito: não
+  -- depender de mais uma tabela/lookup por ambiente para a URL).
+  -- --------------------------------------------------------------------------
+  gc_lookup_type       CONSTANT VARCHAR2(30) := 'XXISV_CSF_MULTORG_SIC';
+  gc_lk_cd              CONSTANT VARCHAR2(30) := 'CD';
+  gc_lk_hash             CONSTANT VARCHAR2(30) := 'HASH';
+  gc_lk_wallet_path        CONSTANT VARCHAR2(30) := 'WALLET_PATH';
+  gc_lk_wallet_password      CONSTANT VARCHAR2(30) := 'WALLET_PASSWORD';
+  gc_lk_ambiente                CONSTANT VARCHAR2(30) := 'AMBIENTE';
+
+  gc_ambiente_hml   CONSTANT VARCHAR2(20) := 'HOMOLOGACAO';
+  gc_ambiente_prod  CONSTANT VARCHAR2(20) := 'PRODUCAO';
+  gc_ambiente_qa    CONSTANT VARCHAR2(20) := 'QA';
+
+  -- Endpoints de envio (Leiaute_API_REST_Eventos_NFe_V1_2.docx, tabela de
+  -- endpoints). Ajustar caso a Compliance publique uma URL diferente.
+  gc_url_hml   CONSTANT VARCHAR2(500) := 'https://apphml.compliancefiscal.com.br/api-eventos/v1/integracoes/eventos-nfe';
+  gc_url_prod  CONSTANT VARCHAR2(500) := 'https://app.compliancefiscal.com.br/api-eventos/v1/integracoes/eventos-nfe';
+  gc_url_qa    CONSTANT VARCHAR2(500) := 'https://qa.compliancefiscal.com.br/api-eventos/v1/integracoes/eventos-nfe';
+
+  -- TODO: endpoints de consulta de status, ainda não documentados pela
+  -- Compliance Fiscal (leiaute v1.2 só define o envio). Preencher assim que
+  -- publicados; enquanto NULL, poll_event_status_f não tenta consultar.
+  gc_status_url_hml   CONSTANT VARCHAR2(500) := NULL;
+  gc_status_url_prod  CONSTANT VARCHAR2(500) := NULL;
+  gc_status_url_qa    CONSTANT VARCHAR2(500) := NULL;
+
+  gc_http_timeout_sec  CONSTANT NUMBER := 30;
+  gc_poll_interval_sec CONSTANT NUMBER := 5;
+  gc_poll_max_wait_sec CONSTANT NUMBER := 90;
+
+  TYPE t_config_rec IS RECORD (
+    endpoint_url        VARCHAR2(500),
+    status_endpoint_url VARCHAR2(500),
+    mult_org_cd         VARCHAR2(50),
+    mult_org_hash       VARCHAR2(500),
+    wallet_path         VARCHAR2(500),
+    wallet_password     VARCHAR2(200)
+  );
+
+  -- --------------------------------------------------------------------------
   -- Cursores privados sobre as views padrão da Localização Brasil (CLL_F255_*).
   -- Colunas usadas conforme EBS_RT_Eventos_Mapping_ISV.xlsx e a Cartilha EBS -
   -- Eventos - NF Deb Cred.pdf. EVENT_STATUS = 'CANCEL' identifica uma
@@ -125,21 +173,98 @@ IS
 
   -- ==========================================================================
   -- get_config_f
+  -- Monta a configuração de envio a partir de FND_LOOKUP_VALUES
+  -- (LOOKUP_TYPE = XXISV_CSF_MULTORG_SIC) + URLs fixas no package. CD/HASH/
+  -- AMBIENTE são obrigatórios (sem eles não há como autenticar/rotear a
+  -- chamada); WALLET_PATH/WALLET_PASSWORD são opcionais, mesmo padrão do
+  -- exemplo original (NULL quando não cadastrados).
   -- ==========================================================================
-  FUNCTION get_config_f (p_env_code IN VARCHAR2) RETURN xxisv_evt_config%ROWTYPE
+  FUNCTION get_config_f RETURN t_config_rec
   IS
-    l_config xxisv_evt_config%ROWTYPE;
+    l_config   t_config_rec;
+    l_ambiente VARCHAR2(20);
   BEGIN
-    SELECT *
-    INTO   l_config
-    FROM   xxisv_evt_config
-    WHERE  env_code = p_env_code
-    AND    active_flag = 'Y';
+    BEGIN
+      SELECT a.tag
+      INTO   l_ambiente
+      FROM   fnd_lookup_values a
+      WHERE  a.lookup_type = gc_lookup_type
+      AND    a.lookup_code = gc_lk_ambiente
+      AND    a.language    = USERENV('LANG')
+      AND    NVL(a.end_date_active, SYSDATE) >= SYSDATE;
+    EXCEPTION
+      WHEN NO_DATA_FOUND THEN
+        RAISE ex_config_not_found;
+    END;
+
+    CASE UPPER(l_ambiente)
+      WHEN gc_ambiente_hml THEN
+        l_config.endpoint_url        := gc_url_hml;
+        l_config.status_endpoint_url := gc_status_url_hml;
+      WHEN gc_ambiente_prod THEN
+        l_config.endpoint_url        := gc_url_prod;
+        l_config.status_endpoint_url := gc_status_url_prod;
+      WHEN gc_ambiente_qa THEN
+        l_config.endpoint_url        := gc_url_qa;
+        l_config.status_endpoint_url := gc_status_url_qa;
+      ELSE
+        RAISE_APPLICATION_ERROR(-20006,
+          gc_module_name || ': valor de AMBIENTE não reconhecido na lookup ' || gc_lookup_type || ': ' || l_ambiente);
+    END CASE;
+
+    BEGIN
+      SELECT a.tag
+      INTO   l_config.mult_org_cd
+      FROM   fnd_lookup_values a
+      WHERE  a.lookup_type = gc_lookup_type
+      AND    a.lookup_code = gc_lk_cd
+      AND    a.language    = USERENV('LANG')
+      AND    NVL(a.end_date_active, SYSDATE) >= SYSDATE;
+    EXCEPTION
+      WHEN NO_DATA_FOUND THEN
+        RAISE ex_config_not_found;
+    END;
+
+    BEGIN
+      SELECT a.tag
+      INTO   l_config.mult_org_hash
+      FROM   fnd_lookup_values a
+      WHERE  a.lookup_type = gc_lookup_type
+      AND    a.lookup_code = gc_lk_hash
+      AND    a.language    = USERENV('LANG')
+      AND    NVL(a.end_date_active, SYSDATE) >= SYSDATE;
+    EXCEPTION
+      WHEN NO_DATA_FOUND THEN
+        RAISE ex_config_not_found;
+    END;
+
+    BEGIN
+      SELECT a.tag
+      INTO   l_config.wallet_path
+      FROM   fnd_lookup_values a
+      WHERE  a.lookup_type = gc_lookup_type
+      AND    a.lookup_code = gc_lk_wallet_path
+      AND    a.language    = USERENV('LANG')
+      AND    NVL(a.end_date_active, SYSDATE) >= SYSDATE;
+    EXCEPTION
+      WHEN NO_DATA_FOUND THEN
+        l_config.wallet_path := NULL;
+    END;
+
+    BEGIN
+      SELECT a.tag
+      INTO   l_config.wallet_password
+      FROM   fnd_lookup_values a
+      WHERE  a.lookup_type = gc_lookup_type
+      AND    a.lookup_code = gc_lk_wallet_password
+      AND    a.language    = USERENV('LANG')
+      AND    NVL(a.end_date_active, SYSDATE) >= SYSDATE;
+    EXCEPTION
+      WHEN NO_DATA_FOUND THEN
+        l_config.wallet_password := NULL;
+    END;
 
     RETURN l_config;
-  EXCEPTION
-    WHEN NO_DATA_FOUND THEN
-      RAISE ex_config_not_found;
   END get_config_f;
 
   -- ==========================================================================
@@ -148,7 +273,7 @@ IS
   -- registra o resultado em XXISV_EVT_HTTP_LOG.
   -- ==========================================================================
   FUNCTION http_call_f (
-    p_config           IN xxisv_evt_config%ROWTYPE,
+    p_config           IN t_config_rec,
     p_url               IN VARCHAR2,
     p_method             IN VARCHAR2,
     p_body                IN CLOB,
@@ -166,7 +291,7 @@ IS
     l_amount    PLS_INTEGER;
     l_error_msg VARCHAR2(4000);
   BEGIN
-    UTL_HTTP.SET_TRANSFER_TIMEOUT(p_config.http_timeout_sec);
+    UTL_HTTP.SET_TRANSFER_TIMEOUT(gc_http_timeout_sec);
 
     IF g_http_proxy IS NOT NULL THEN
       UTL_HTTP.SET_PROXY(g_http_proxy);
@@ -503,7 +628,7 @@ IS
   -- resposta assumido; ajustar assim que o contrato real for publicado.
   -- ==========================================================================
   PROCEDURE poll_event_status_f (
-    p_config                 IN xxisv_evt_config%ROWTYPE,
+    p_config                 IN t_config_rec,
     p_header                   IN c_header%ROWTYPE,
     p_compliance_batch_ref        IN VARCHAR2,
     x_resolved                       OUT BOOLEAN,
@@ -610,10 +735,9 @@ IS
   -- RETRY_PENDING_EVENTS_P retomar depois.
   -- ==========================================================================
   PROCEDURE process_one_event_p (
-    p_event_header_id IN NUMBER,
-    p_env_code        IN VARCHAR2 DEFAULT 'PROD'
+    p_event_header_id IN NUMBER
   ) IS
-    l_config          xxisv_evt_config%ROWTYPE;
+    l_config          t_config_rec;
     l_header          c_header%ROWTYPE;
     l_payload         CLOB;
     l_http_status     NUMBER;
@@ -628,7 +752,7 @@ IS
     l_cancel_protocol VARCHAR2(20);
     l_json            JSON_OBJECT_T;
   BEGIN
-    l_config := get_config_f(p_env_code);
+    l_config := get_config_f;
 
     OPEN c_header(p_event_header_id);
     FETCH c_header INTO l_header;
@@ -678,9 +802,9 @@ IS
     upsert_control_p(l_header, 'POLLING', p_http_status => l_http_status, p_batch_ref => l_batch_ref);
 
     -- 3) Espera limitada pelo status final, dentro do mesmo processo de envio
-    WHILE l_elapsed < l_config.poll_max_wait_sec LOOP
-      DBMS_LOCK.SLEEP(l_config.poll_interval_sec);
-      l_elapsed := l_elapsed + l_config.poll_interval_sec;
+    WHILE l_elapsed < gc_poll_max_wait_sec LOOP
+      DBMS_LOCK.SLEEP(gc_poll_interval_sec);
+      l_elapsed := l_elapsed + gc_poll_interval_sec;
 
       poll_event_status_f(
         p_config               => l_config,
@@ -717,7 +841,8 @@ IS
     END IF;
   EXCEPTION
     WHEN ex_config_not_found THEN
-      RAISE_APPLICATION_ERROR(-20005, gc_module_name || ': configuração não encontrada/ativa para o ambiente ' || p_env_code);
+      RAISE_APPLICATION_ERROR(-20005,
+        gc_module_name || ': configuração incompleta em FND_LOOKUP_VALUES (' || gc_lookup_type || ') — verificar AMBIENTE/CD/HASH.');
   END process_one_event_p;
 
   -- ==========================================================================
@@ -726,10 +851,9 @@ IS
   -- apenas tenta consultar/capturar o status final novamente.
   -- ==========================================================================
   PROCEDURE retry_one_event_p (
-    p_event_header_id IN NUMBER,
-    p_env_code        IN VARCHAR2
+    p_event_header_id IN NUMBER
   ) IS
-    l_config          xxisv_evt_config%ROWTYPE;
+    l_config          t_config_rec;
     l_header          c_header%ROWTYPE;
     l_ctrl            xxisv_evt_control%ROWTYPE;
     l_resolved        BOOLEAN;
@@ -739,7 +863,7 @@ IS
     l_event_protocol  VARCHAR2(20);
     l_cancel_protocol VARCHAR2(20);
   BEGIN
-    l_config := get_config_f(p_env_code);
+    l_config := get_config_f;
 
     SELECT * INTO l_ctrl FROM xxisv_evt_control WHERE event_header_id = p_event_header_id;
 
@@ -782,12 +906,12 @@ IS
   -- ==========================================================================
   -- Procedimentos públicos
   -- ==========================================================================
-  PROCEDURE process_pending_events_p (p_env_code IN VARCHAR2 DEFAULT 'PROD')
+  PROCEDURE process_pending_events_p
   IS
   BEGIN
     FOR r IN c_pending_notifications LOOP
       BEGIN
-        process_one_event_p(r.event_header_id, p_env_code);
+        process_one_event_p(r.event_header_id);
         COMMIT;
       EXCEPTION
         WHEN OTHERS THEN
@@ -797,7 +921,7 @@ IS
     END LOOP;
   END process_pending_events_p;
 
-  PROCEDURE retry_pending_events_p (p_env_code IN VARCHAR2 DEFAULT 'PROD')
+  PROCEDURE retry_pending_events_p
   IS
   BEGIN
     FOR r IN (
@@ -807,7 +931,7 @@ IS
       ORDER  BY last_attempt_date
     ) LOOP
       BEGIN
-        retry_one_event_p(r.event_header_id, p_env_code);
+        retry_one_event_p(r.event_header_id);
         COMMIT;
       EXCEPTION
         WHEN OTHERS THEN

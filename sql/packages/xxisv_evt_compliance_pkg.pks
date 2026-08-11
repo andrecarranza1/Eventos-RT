@@ -23,14 +23,22 @@ IS
        2) RETRY_PENDING_EVENTS_P é um job recorrente (DBMS_SCHEDULER) que retoma
           eventos que ficaram em POLLING/TIMEOUT além da janela síncrona inicial.
 
+     Configuração:
+       As URLs dos 3 ambientes (Homologação/Produção/QA) ficam fixas como
+       constantes no corpo do package (gc_url_*). O ambiente ativo nesta
+       instância EBS, as credenciais (cd/hash) e o wallet TLS são lidos de
+       FND_LOOKUP_VALUES (LOOKUP_TYPE = 'XXISV_CSF_MULTORG_SIC'), mesmo padrão
+       já usado para WALLET_PATH/WALLET_PASSWORD. Ver get_config_f no body e
+       docs/ARQUITETURA.md para os LOOKUP_CODE esperados.
+
      TODO — pendente de confirmação da Compliance Fiscal:
        O leiaute v1.2 documenta apenas o endpoint de ENVIO
        (POST /v1/integracoes/eventos-nfe), processado de forma assíncrona via
        RabbitMQ internamente. Não existe, no leiaute atual, um endpoint de
        CONSULTA de status/protocolo. A função privada poll_event_status_f foi
-       implementada contra XXISV_EVT_CONFIG.STATUS_ENDPOINT_URL como
-       placeholder — precisa ser validada/ajustada assim que a Compliance
-       Fiscal publicar o contrato real de consulta (ver docs/ARQUITETURA.md).
+       implementada contra um placeholder (gc_status_url_*, hoje NULL) —
+       precisa ser validada/ajustada assim que a Compliance Fiscal publicar o
+       contrato real de consulta (ver docs/ARQUITETURA.md).
      ========================================================================== */
 
   gc_module_name CONSTANT VARCHAR2(30) := 'XXISV_EVT_COMPLIANCE_PKG';
@@ -50,27 +58,23 @@ IS
   ex_http_error        EXCEPTION;
 
   -- --------------------------------------------------------------------------
-  -- Job principal: varre notificações pendentes de um ambiente e processa
-  -- cada evento novo (envio + espera limitada pelo status).
+  -- Job principal: varre notificações pendentes e processa cada evento novo
+  -- (envio + espera limitada pelo status), no ambiente configurado via
+  -- FND_LOOKUP_VALUES (ver get_config_f no body).
   -- --------------------------------------------------------------------------
-  PROCEDURE process_pending_events_p (
-    p_env_code IN VARCHAR2 DEFAULT 'PROD'
-  );
+  PROCEDURE process_pending_events_p;
 
   -- --------------------------------------------------------------------------
   -- Job de retomada: eventos que ficaram em POLLING/TIMEOUT/ERROR transitório
   -- além da janela síncrona do envio original.
   -- --------------------------------------------------------------------------
-  PROCEDURE retry_pending_events_p (
-    p_env_code IN VARCHAR2 DEFAULT 'PROD'
-  );
+  PROCEDURE retry_pending_events_p;
 
   -- --------------------------------------------------------------------------
   -- Processa um único EVENT_HEADER_ID (útil para reprocesso manual/testes).
   -- --------------------------------------------------------------------------
   PROCEDURE process_one_event_p (
-    p_event_header_id IN NUMBER,
-    p_env_code        IN VARCHAR2 DEFAULT 'PROD'
+    p_event_header_id IN NUMBER
   );
 
 END xxisv_evt_compliance_pkg;
