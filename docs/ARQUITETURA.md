@@ -140,7 +140,7 @@ aprovação da SEFAZ. A solução implementada:
 ## Pontos em aberto (validar antes de produção)
 
 1. **Endpoint de consulta de status — bloqueante.** O leiaute v1.2 só
-   documenta o `POST` de envio. `poll_event_status_f` está implementada
+   documenta o `POST` de envio. `poll_event_status_p` está implementada
    contra `gc_status_url_*` (hoje `NULL`/placeholder no package) com
    um contrato de resposta assumido:
    ```json

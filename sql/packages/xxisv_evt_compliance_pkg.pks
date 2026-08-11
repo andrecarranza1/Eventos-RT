@@ -35,8 +35,8 @@ IS
        O leiaute v1.2 documenta apenas o endpoint de ENVIO
        (POST /v1/integracoes/eventos-nfe), processado de forma assíncrona via
        RabbitMQ internamente. Não existe, no leiaute atual, um endpoint de
-       CONSULTA de status/protocolo. A função privada poll_event_status_f foi
-       implementada contra um placeholder (gc_status_url_*, hoje NULL) —
+       CONSULTA de status/protocolo. O procedimento privado poll_event_status_p
+       foi implementado contra um placeholder (gc_status_url_*, hoje NULL) —
        precisa ser validada/ajustada assim que a Compliance Fiscal publicar o
        contrato real de consulta (ver docs/ARQUITETURA.md).
      ========================================================================== */
@@ -52,10 +52,12 @@ IS
   gc_evt_aceite_debito    CONSTANT VARCHAR2(6) := '211128';
   gc_evt_credito          CONSTANT VARCHAR2(6) := '211150';
 
-  -- Exceções públicas
-  ex_config_not_found  EXCEPTION;
-  ex_unsupported_event EXCEPTION;
-  ex_http_error        EXCEPTION;
+  -- Erros de execução (config incompleta, evento não mapeado, falha HTTP,
+  -- header não encontrado etc.) são sinalizados via RAISE_APPLICATION_ERROR
+  -- com códigos ORA-20002 a ORA-20008 — ver registro completo no início do
+  -- package body (xxisv_evt_compliance_pkg.pkb), com o código e a mensagem
+  -- de cada um. Não há exceções nomeadas públicas: os SQLCODE/SQLERRM já
+  -- carregam contexto suficiente para log e troubleshooting.
 
   -- --------------------------------------------------------------------------
   -- Job principal: varre notificações pendentes e processa cada evento novo

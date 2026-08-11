@@ -16,12 +16,12 @@ IS
   -- As URLs em si ficam fixas aqui no package (pedido explícito: não
   -- depender de mais uma tabela/lookup por ambiente para a URL).
   -- --------------------------------------------------------------------------
-  gc_lookup_type       CONSTANT VARCHAR2(30) := 'XXISV_CSF_MULTORG_SIC';
+  gc_lookup_type        CONSTANT VARCHAR2(30) := 'XXISV_CSF_MULTORG_SIC';
   gc_lk_cd              CONSTANT VARCHAR2(30) := 'CD';
-  gc_lk_hash             CONSTANT VARCHAR2(30) := 'HASH';
-  gc_lk_wallet_path        CONSTANT VARCHAR2(30) := 'WALLET_PATH';
-  gc_lk_wallet_password      CONSTANT VARCHAR2(30) := 'WALLET_PASSWORD';
-  gc_lk_ambiente                CONSTANT VARCHAR2(30) := 'AMBIENTE';
+  gc_lk_hash            CONSTANT VARCHAR2(30) := 'HASH';
+  gc_lk_wallet_path     CONSTANT VARCHAR2(30) := 'WALLET_PATH';
+  gc_lk_wallet_password CONSTANT VARCHAR2(30) := 'WALLET_PASSWORD';
+  gc_lk_ambiente        CONSTANT VARCHAR2(30) := 'AMBIENTE';
 
   gc_ambiente_hml   CONSTANT VARCHAR2(20) := 'HOMOLOGACAO';
   gc_ambiente_prod  CONSTANT VARCHAR2(20) := 'PRODUCAO';
@@ -35,7 +35,7 @@ IS
 
   -- TODO: endpoints de consulta de status, ainda não documentados pela
   -- Compliance Fiscal (leiaute v1.2 só define o envio). Preencher assim que
-  -- publicados; enquanto NULL, poll_event_status_f não tenta consultar.
+  -- publicados; enquanto NULL, poll_event_status_p não tenta consultar.
   gc_status_url_hml   CONSTANT VARCHAR2(500) := NULL;
   gc_status_url_prod  CONSTANT VARCHAR2(500) := NULL;
   gc_status_url_qa    CONSTANT VARCHAR2(500) := NULL;
@@ -43,6 +43,18 @@ IS
   gc_http_timeout_sec  CONSTANT NUMBER := 30;
   gc_poll_interval_sec CONSTANT NUMBER := 5;
   gc_poll_max_wait_sec CONSTANT NUMBER := 90;
+
+  -- --------------------------------------------------------------------------
+  -- Registro dos erros customizados (ORA-200xx) levantados por este package —
+  -- referência rápida para suporte/troubleshooting sem precisar grepar o body:
+  --   -20002  http_call_f                          falha na chamada HTTP (rede/timeout/TLS)
+  --   -20003  update_ebs_status_p                  CLL_F255_RT_EVENTS_PUB.return_status_p retornou erro
+  --   -20004  process_one_event_p / retry_one_event_p  EVENT_HEADER_ID não encontrado nas views CLL_F255_*
+  --   -20005  process_one_event_p / retry_one_event_p  configuração incompleta em FND_LOOKUP_VALUES
+  --   -20006  get_config_f                          valor de AMBIENTE não reconhecido na lookup
+  --   -20007  build_payload_f                       código de evento fora do escopo mapeado
+  --   -20008  retry_one_event_p                     XXISV_EVT_CONTROL não encontrado para o evento
+  -- --------------------------------------------------------------------------
 
   TYPE t_config_rec IS RECORD (
     endpoint_url        VARCHAR2(500),
@@ -52,6 +64,11 @@ IS
     wallet_path         VARCHAR2(500),
     wallet_password     VARCHAR2(200)
   );
+
+  -- Uso interno apenas: controla o fluxo entre get_config_f e quem a chama
+  -- (process_one_event_p/retry_one_event_p) — nunca escapa do package body,
+  -- sempre é traduzido em RAISE_APPLICATION_ERROR(-20005, ...) antes disso.
+  ex_config_not_found EXCEPTION;
 
   -- --------------------------------------------------------------------------
   -- Cursores privados sobre as views padrão da Localização Brasil (CLL_F255_*).
@@ -110,8 +127,8 @@ IS
   -- ==========================================================================
   FUNCTION get_tax_line_f (
     p_event_header_id IN NUMBER,
-    p_line_number      IN NUMBER,
-    p_tax_name           IN VARCHAR2
+    p_line_number     IN NUMBER,
+    p_tax_name        IN VARCHAR2
   ) RETURN t_tax_line_rec
   IS
     l_rec t_tax_line_rec;
@@ -152,12 +169,12 @@ IS
   -- ==========================================================================
   PROCEDURE log_http_p (
     p_event_header_id IN NUMBER,
-    p_call_type        IN VARCHAR2,
-    p_url                IN VARCHAR2,
-    p_request_body         IN CLOB,
-    p_http_status            IN NUMBER,
-    p_response_body            IN CLOB,
-    p_error_message               IN VARCHAR2
+    p_call_type       IN VARCHAR2,
+    p_url             IN VARCHAR2,
+    p_request_body    IN CLOB,
+    p_http_status     IN NUMBER,
+    p_response_body   IN CLOB,
+    p_error_message   IN VARCHAR2
   ) IS
     PRAGMA AUTONOMOUS_TRANSACTION;
   BEGIN
@@ -273,13 +290,13 @@ IS
   -- registra o resultado em XXISV_EVT_HTTP_LOG.
   -- ==========================================================================
   FUNCTION http_call_f (
-    p_config           IN t_config_rec,
-    p_url               IN VARCHAR2,
-    p_method             IN VARCHAR2,
-    p_body                IN CLOB,
-    p_event_header_id       IN NUMBER,
-    p_call_type               IN VARCHAR2,
-    x_http_status               OUT NUMBER
+    p_config          IN t_config_rec,
+    p_url             IN VARCHAR2,
+    p_method          IN VARCHAR2,
+    p_body            IN CLOB,
+    p_event_header_id IN NUMBER,
+    p_call_type       IN VARCHAR2,
+    x_http_status     OUT NUMBER
   ) RETURN CLOB
   IS
     l_http_req  UTL_HTTP.req;
@@ -498,9 +515,9 @@ IS
   -- ==========================================================================
   FUNCTION build_envelope_f (
     p_header        IN c_header%ROWTYPE,
-    p_codigo_evento   IN VARCHAR2,
-    p_tipo_autor        IN NUMBER,
-    p_dados               IN JSON_ELEMENT_T
+    p_codigo_evento IN VARCHAR2,
+    p_tipo_autor    IN NUMBER,
+    p_dados         IN JSON_ELEMENT_T
   ) RETURN CLOB
   IS
     l_evento  JSON_OBJECT_T := JSON_OBJECT_T();
@@ -568,7 +585,8 @@ IS
         RETURN build_envelope_f(p_header, gc_evt_credito, 2, l_dados_arr);
 
       ELSE
-        RAISE ex_unsupported_event;
+        RAISE_APPLICATION_ERROR(-20007,
+          gc_module_name || ': código de evento fora do escopo mapeado (EVENT_CODE = ' || p_header.event_code || ')');
     END CASE;
   END build_payload_f;
 
@@ -579,36 +597,36 @@ IS
   -- ==========================================================================
   PROCEDURE update_ebs_status_p (
     p_header             IN c_header%ROWTYPE,
-    p_status_msg           IN VARCHAR2,
-    p_error_code             IN VARCHAR2 DEFAULT NULL,
-    p_error_msg                IN VARCHAR2 DEFAULT NULL,
-    p_event_protocol              IN VARCHAR2 DEFAULT NULL,
-    p_cancel_event_code              IN VARCHAR2 DEFAULT NULL,
-    p_cancel_protocol                   IN VARCHAR2 DEFAULT NULL,
-    p_cancel_failed                        IN VARCHAR2 DEFAULT NULL
+    p_status_msg         IN VARCHAR2,
+    p_error_code         IN VARCHAR2 DEFAULT NULL,
+    p_error_msg          IN VARCHAR2 DEFAULT NULL,
+    p_event_protocol     IN VARCHAR2 DEFAULT NULL,
+    p_cancel_event_code  IN VARCHAR2 DEFAULT NULL,
+    p_cancel_protocol    IN VARCHAR2 DEFAULT NULL,
+    p_cancel_failed      IN VARCHAR2 DEFAULT NULL
   ) IS
     l_return_status  VARCHAR2(4000);
     l_return_message VARCHAR2(4000);
   BEGIN
     cll_f255_rt_events_pub.return_status_p (
       p_event_header_id    => p_header.event_header_id,
-      p_fd_key               => p_header.fd_key,
-      p_event_code              => p_header.event_code,
-      p_taxpayer_id                => p_header.taxpayer_id,
-      p_status_msg                   => p_status_msg,
-      p_error_code                      => p_error_code,
-      p_error_msg                          => p_error_msg,
-      p_event_date                            => SYSDATE,
-      p_event_protocol                           => p_event_protocol,
-      p_cancel_event_code                           => p_cancel_event_code,
-      p_cancel_protocol                                => p_cancel_protocol,
-      p_ind_deferred                                      => NULL,
-      p_reason_code                                          => NULL,
-      p_reason_description                                      => NULL,
-      p_process                                                    => p_header.process,
-      p_cancel_failed                                                 => p_cancel_failed,
-      x_return_status                                                    => l_return_status,
-      x_return_message                                                      => l_return_message
+      p_fd_key              => p_header.fd_key,
+      p_event_code          => p_header.event_code,
+      p_taxpayer_id         => p_header.taxpayer_id,
+      p_status_msg          => p_status_msg,
+      p_error_code          => p_error_code,
+      p_error_msg           => p_error_msg,
+      p_event_date          => SYSDATE,
+      p_event_protocol      => p_event_protocol,
+      p_cancel_event_code   => p_cancel_event_code,
+      p_cancel_protocol     => p_cancel_protocol,
+      p_ind_deferred        => NULL,
+      p_reason_code         => NULL,
+      p_reason_description  => NULL,
+      p_process             => p_header.process,
+      p_cancel_failed       => p_cancel_failed,
+      x_return_status       => l_return_status,
+      x_return_message      => l_return_message
     );
 
     -- ASSUNÇÃO: a Cartilha não documenta os valores possíveis de
@@ -621,22 +639,29 @@ IS
   END update_ebs_status_p;
 
   -- ==========================================================================
-  -- poll_event_status_f
+  -- poll_event_status_p
   -- TODO — pendente de confirmação da Compliance Fiscal: o leiaute v1.2 não
-  -- documenta um endpoint de consulta de status. Esta função consulta
-  -- XXISV_EVT_CONFIG.STATUS_ENDPOINT_URL (placeholder) com um contrato de
-  -- resposta assumido; ajustar assim que o contrato real for publicado.
+  -- documenta um endpoint de consulta de status. Este procedimento consulta
+  -- p_config.status_endpoint_url (gc_status_url_*, placeholder até a
+  -- Compliance publicar o contrato real) com um contrato de resposta
+  -- assumido; ajustar assim que confirmado.
+  --
+  -- Falha ao consultar/parsear não deve interromper o job (x_resolved fica
+  -- FALSE e o evento é retomado depois pelo job de retry); mas é logada em
+  -- XXISV_EVT_HTTP_LOG para dar visibilidade ao suporte — sem isso, um
+  -- contrato de resposta quebrado faria os eventos ficarem represados em
+  -- TIMEOUT sem nenhuma pista do motivo.
   -- ==========================================================================
-  PROCEDURE poll_event_status_f (
-    p_config                 IN t_config_rec,
-    p_header                   IN c_header%ROWTYPE,
-    p_compliance_batch_ref        IN VARCHAR2,
-    x_resolved                       OUT BOOLEAN,
-    x_status_msg                        OUT VARCHAR2,
-    x_error_code                           OUT VARCHAR2,
-    x_error_msg                               OUT VARCHAR2,
-    x_event_protocol                             OUT VARCHAR2,
-    x_cancel_protocol                               OUT VARCHAR2
+  PROCEDURE poll_event_status_p (
+    p_config              IN t_config_rec,
+    p_header              IN c_header%ROWTYPE,
+    p_compliance_batch_ref IN VARCHAR2,
+    x_resolved            OUT BOOLEAN,
+    x_status_msg          OUT VARCHAR2,
+    x_error_code          OUT VARCHAR2,
+    x_error_msg           OUT VARCHAR2,
+    x_event_protocol      OUT VARCHAR2,
+    x_cancel_protocol     OUT VARCHAR2
   ) IS
     l_http_status NUMBER;
     l_response    CLOB;
@@ -656,12 +681,12 @@ IS
 
     l_response := http_call_f(
       p_config          => p_config,
-      p_url               => l_url,
-      p_method              => 'GET',
-      p_body                  => NULL,
-      p_event_header_id          => p_header.event_header_id,
-      p_call_type                  => 'POLL',
-      x_http_status                   => l_http_status
+      p_url             => l_url,
+      p_method          => 'GET',
+      p_body            => NULL,
+      p_event_header_id => p_header.event_header_id,
+      p_call_type       => 'POLL',
+      x_http_status     => l_http_status
     );
 
     IF l_http_status = 200 AND l_response IS NOT NULL THEN
@@ -679,23 +704,26 @@ IS
     END IF;
   EXCEPTION
     WHEN OTHERS THEN
-      -- Falha ao consultar não deve interromper o job; o evento permanece
-      -- pendente para o job de retry tentar novamente.
+      -- http_call_f já loga falhas de HTTP antes de propagar; aqui cobrimos
+      -- o caso de a chamada ter respondido 200 mas com um corpo que não bate
+      -- com o contrato assumido (JSON_OBJECT_T.parse/get_string falhando).
       x_resolved := FALSE;
-  END poll_event_status_f;
+      log_http_p(p_header.event_header_id, 'POLL', p_config.status_endpoint_url,
+        NULL, l_http_status, l_response, 'poll_event_status_p: ' || SUBSTR(SQLERRM, 1, 3900));
+  END poll_event_status_p;
 
   -- ==========================================================================
   -- upsert_control_p
   -- ==========================================================================
   PROCEDURE upsert_control_p (
-    p_header             IN c_header%ROWTYPE,
-    p_local_status         IN VARCHAR2,
-    p_http_status             IN NUMBER DEFAULT NULL,
-    p_batch_ref                 IN VARCHAR2 DEFAULT NULL,
-    p_event_protocol               IN VARCHAR2 DEFAULT NULL,
-    p_cancel_protocol                 IN VARCHAR2 DEFAULT NULL,
-    p_error_code                         IN VARCHAR2 DEFAULT NULL,
-    p_error_msg                             IN VARCHAR2 DEFAULT NULL
+    p_header           IN c_header%ROWTYPE,
+    p_local_status     IN VARCHAR2,
+    p_http_status      IN NUMBER DEFAULT NULL,
+    p_batch_ref        IN VARCHAR2 DEFAULT NULL,
+    p_event_protocol   IN VARCHAR2 DEFAULT NULL,
+    p_cancel_protocol  IN VARCHAR2 DEFAULT NULL,
+    p_error_code       IN VARCHAR2 DEFAULT NULL,
+    p_error_msg        IN VARCHAR2 DEFAULT NULL
   ) IS
   BEGIN
     MERGE INTO xxisv_evt_control c
@@ -703,14 +731,14 @@ IS
     ON (c.event_header_id = src.event_header_id)
     WHEN MATCHED THEN UPDATE SET
       local_status         = p_local_status,
-      http_status_code       = NVL(p_http_status, c.http_status_code),
-      compliance_batch_ref     = NVL(p_batch_ref, c.compliance_batch_ref),
-      event_protocol              = NVL(p_event_protocol, c.event_protocol),
-      cancel_protocol                = NVL(p_cancel_protocol, c.cancel_protocol),
-      error_code                        = p_error_code,
-      error_message                        = p_error_msg,
-      attempt_count                           = c.attempt_count + 1,
-      last_attempt_date                          = SYSDATE,
+      http_status_code     = NVL(p_http_status, c.http_status_code),
+      compliance_batch_ref = NVL(p_batch_ref, c.compliance_batch_ref),
+      event_protocol       = NVL(p_event_protocol, c.event_protocol),
+      cancel_protocol      = NVL(p_cancel_protocol, c.cancel_protocol),
+      error_code           = p_error_code,
+      error_message        = p_error_msg,
+      attempt_count        = c.attempt_count + 1,
+      last_attempt_date    = SYSDATE,
       resolved_date = CASE WHEN p_local_status IN ('APPROVED', 'CANCELLED', 'ERROR')
                             THEN SYSDATE ELSE c.resolved_date END,
       last_updated_by = USER,
@@ -725,6 +753,44 @@ IS
       p_error_code, p_error_msg, 1, SYSDATE, SYSDATE
     );
   END upsert_control_p;
+
+  -- ==========================================================================
+  -- apply_resolution_p
+  -- Traduz o resultado de poll_event_status_p em status final no EBS
+  -- (update_ebs_status_p) e em XXISV_EVT_CONTROL (upsert_control_p) — ou, se
+  -- não resolvido, marca TIMEOUT para o job de retry tentar depois. Ponto
+  -- único usado tanto pelo envio (process_one_event_p) quanto pela retomada
+  -- (retry_one_event_p), para as duas rotinas nunca divergirem nessa regra.
+  -- ==========================================================================
+  PROCEDURE apply_resolution_p (
+    p_header          IN c_header%ROWTYPE,
+    p_resolved        IN BOOLEAN,
+    p_status_msg      IN VARCHAR2,
+    p_error_code      IN VARCHAR2,
+    p_error_msg       IN VARCHAR2,
+    p_event_protocol  IN VARCHAR2,
+    p_cancel_protocol IN VARCHAR2
+  ) IS
+  BEGIN
+    IF p_resolved THEN
+      IF p_status_msg = 'APPROVED' THEN
+        update_ebs_status_p(p_header, 'APPROVED', p_event_protocol => p_event_protocol);
+      ELSIF p_status_msg = 'CANCELLED' THEN
+        update_ebs_status_p(p_header, 'CANCELLED',
+          p_event_protocol => p_event_protocol,
+          p_cancel_event_code => gc_evt_cancelamento,
+          p_cancel_protocol => p_cancel_protocol);
+      ELSIF p_status_msg = 'ERROR' THEN
+        update_ebs_status_p(p_header, 'ERROR', p_error_code => p_error_code, p_error_msg => p_error_msg);
+      END IF;
+
+      upsert_control_p(p_header, p_status_msg,
+        p_event_protocol => p_event_protocol, p_cancel_protocol => p_cancel_protocol,
+        p_error_code => p_error_code, p_error_msg => p_error_msg);
+    ELSE
+      upsert_control_p(p_header, 'TIMEOUT');
+    END IF;
+  END apply_resolution_p;
 
   -- ==========================================================================
   -- process_one_event_p
@@ -773,13 +839,13 @@ IS
     l_payload := build_payload_f(l_header);
 
     l_response := http_call_f(
-      p_config           => l_config,
-      p_url               => l_config.endpoint_url,
-      p_method              => 'POST',
-      p_body                  => l_payload,
-      p_event_header_id          => l_header.event_header_id,
-      p_call_type                  => 'SEND',
-      x_http_status                   => l_http_status
+      p_config          => l_config,
+      p_url             => l_config.endpoint_url,
+      p_method          => 'POST',
+      p_body            => l_payload,
+      p_event_header_id => l_header.event_header_id,
+      p_call_type       => 'SEND',
+      x_http_status     => l_http_status
     );
 
     IF l_http_status NOT IN (200, 201, 202) THEN
@@ -806,39 +872,23 @@ IS
       DBMS_LOCK.SLEEP(gc_poll_interval_sec);
       l_elapsed := l_elapsed + gc_poll_interval_sec;
 
-      poll_event_status_f(
+      poll_event_status_p(
         p_config               => l_config,
-        p_header                 => l_header,
-        p_compliance_batch_ref     => l_batch_ref,
-        x_resolved                   => l_resolved,
-        x_status_msg                    => l_status_msg,
-        x_error_code                       => l_error_code,
-        x_error_msg                           => l_error_msg,
-        x_event_protocol                         => l_event_protocol,
-        x_cancel_protocol                           => l_cancel_protocol
+        p_header               => l_header,
+        p_compliance_batch_ref => l_batch_ref,
+        x_resolved             => l_resolved,
+        x_status_msg           => l_status_msg,
+        x_error_code           => l_error_code,
+        x_error_msg            => l_error_msg,
+        x_event_protocol       => l_event_protocol,
+        x_cancel_protocol      => l_cancel_protocol
       );
 
       EXIT WHEN l_resolved;
     END LOOP;
 
-    IF l_resolved THEN
-      IF l_status_msg = 'APPROVED' THEN
-        update_ebs_status_p(l_header, 'APPROVED', p_event_protocol => l_event_protocol);
-      ELSIF l_status_msg = 'CANCELLED' THEN
-        update_ebs_status_p(l_header, 'CANCELLED',
-          p_event_protocol => l_event_protocol,
-          p_cancel_event_code => gc_evt_cancelamento,
-          p_cancel_protocol => l_cancel_protocol);
-      ELSIF l_status_msg = 'ERROR' THEN
-        update_ebs_status_p(l_header, 'ERROR', p_error_code => l_error_code, p_error_msg => l_error_msg);
-      END IF;
-
-      upsert_control_p(l_header, l_status_msg,
-        p_event_protocol => l_event_protocol, p_cancel_protocol => l_cancel_protocol,
-        p_error_code => l_error_code, p_error_msg => l_error_msg);
-    ELSE
-      upsert_control_p(l_header, 'TIMEOUT');
-    END IF;
+    apply_resolution_p(l_header, l_resolved, l_status_msg,
+      l_error_code, l_error_msg, l_event_protocol, l_cancel_protocol);
   EXCEPTION
     WHEN ex_config_not_found THEN
       RAISE_APPLICATION_ERROR(-20005,
@@ -848,7 +898,9 @@ IS
   -- ==========================================================================
   -- retry_one_event_p
   -- Retoma um evento já enviado (POLLING/TIMEOUT), sem reenviar o payload —
-  -- apenas tenta consultar/capturar o status final novamente.
+  -- apenas tenta consultar/capturar o status final novamente. Mesmas
+  -- validações de process_one_event_p (config/header existentes), para as
+  -- duas rotinas se comportarem de forma previsível.
   -- ==========================================================================
   PROCEDURE retry_one_event_p (
     p_event_header_id IN NUMBER
@@ -865,42 +917,40 @@ IS
   BEGIN
     l_config := get_config_f;
 
-    SELECT * INTO l_ctrl FROM xxisv_evt_control WHERE event_header_id = p_event_header_id;
+    BEGIN
+      SELECT * INTO l_ctrl FROM xxisv_evt_control WHERE event_header_id = p_event_header_id;
+    EXCEPTION
+      WHEN NO_DATA_FOUND THEN
+        RAISE_APPLICATION_ERROR(-20008,
+          gc_module_name || ': XXISV_EVT_CONTROL não encontrado para EVENT_HEADER_ID: ' || p_event_header_id);
+    END;
 
     OPEN c_header(p_event_header_id);
     FETCH c_header INTO l_header;
+    IF c_header%NOTFOUND THEN
+      CLOSE c_header;
+      RAISE_APPLICATION_ERROR(-20004, gc_module_name || ': EVENT_HEADER_ID não encontrado: ' || p_event_header_id);
+    END IF;
     CLOSE c_header;
 
-    poll_event_status_f(
+    poll_event_status_p(
       p_config               => l_config,
-      p_header                 => l_header,
-      p_compliance_batch_ref     => l_ctrl.compliance_batch_ref,
-      x_resolved                   => l_resolved,
-      x_status_msg                    => l_status_msg,
-      x_error_code                       => l_error_code,
-      x_error_msg                           => l_error_msg,
-      x_event_protocol                         => l_event_protocol,
-      x_cancel_protocol                           => l_cancel_protocol
+      p_header               => l_header,
+      p_compliance_batch_ref => l_ctrl.compliance_batch_ref,
+      x_resolved             => l_resolved,
+      x_status_msg           => l_status_msg,
+      x_error_code           => l_error_code,
+      x_error_msg            => l_error_msg,
+      x_event_protocol       => l_event_protocol,
+      x_cancel_protocol      => l_cancel_protocol
     );
 
-    IF l_resolved THEN
-      IF l_status_msg = 'APPROVED' THEN
-        update_ebs_status_p(l_header, 'APPROVED', p_event_protocol => l_event_protocol);
-      ELSIF l_status_msg = 'CANCELLED' THEN
-        update_ebs_status_p(l_header, 'CANCELLED',
-          p_event_protocol => l_event_protocol,
-          p_cancel_event_code => gc_evt_cancelamento,
-          p_cancel_protocol => l_cancel_protocol);
-      ELSIF l_status_msg = 'ERROR' THEN
-        update_ebs_status_p(l_header, 'ERROR', p_error_code => l_error_code, p_error_msg => l_error_msg);
-      END IF;
-
-      upsert_control_p(l_header, l_status_msg,
-        p_event_protocol => l_event_protocol, p_cancel_protocol => l_cancel_protocol,
-        p_error_code => l_error_code, p_error_msg => l_error_msg);
-    ELSE
-      upsert_control_p(l_header, 'TIMEOUT');
-    END IF;
+    apply_resolution_p(l_header, l_resolved, l_status_msg,
+      l_error_code, l_error_msg, l_event_protocol, l_cancel_protocol);
+  EXCEPTION
+    WHEN ex_config_not_found THEN
+      RAISE_APPLICATION_ERROR(-20005,
+        gc_module_name || ': configuração incompleta em FND_LOOKUP_VALUES (' || gc_lookup_type || ') — verificar AMBIENTE/CD/HASH.');
   END retry_one_event_p;
 
   -- ==========================================================================
