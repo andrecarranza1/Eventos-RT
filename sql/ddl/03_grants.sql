@@ -1,6 +1,6 @@
 -- ============================================================================
 -- Grants necessários para o schema XXISV executar o package
--- XXISV_EVT_COMPLIANCE_PKG. Ajustar owners conforme a instalação real do
+-- XXISV_CSF_EVT_COMPLIANCE_PKG. Ajustar owners conforme a instalação real do
 -- EBS (views CLL_F255_* e o package CLL_F255_RT_EVENTS_PUB normalmente
 -- pertencem ao schema da Localização Brasil, ex.: JL_BR ou CLL, validar).
 -- ============================================================================
@@ -22,6 +22,3 @@ GRANT EXECUTE ON cll_f255_rt_events_pub TO xxisv;
 
 -- UTL_HTTP / rede (além do ACL em sql/acl/01_setup_network_acl.sql)
 GRANT EXECUTE ON UTL_HTTP TO xxisv;
-
--- DBMS_SCHEDULER (se os jobs forem criados por outro usuário que não XXISV)
-GRANT CREATE JOB TO xxisv;

@@ -1,4 +1,4 @@
-CREATE OR REPLACE PACKAGE xxisv.xxisv_evt_compliance_pkg
+CREATE OR REPLACE PACKAGE xxisv.xxisv_csf_evt_compliance_pkg
 AUTHID DEFINER
 IS
   /* ==========================================================================
@@ -20,8 +20,11 @@ IS
           (EVENT_NAME = 'oracle.apps.cll.event_headers'), envia cada evento novo
           via HTTP para a Compliance Fiscal e, na mesma chamada, aguarda de forma
           limitada (poll_max_wait_sec) por um retorno de processamento.
-       2) RETRY_PENDING_EVENTS_P é um job recorrente (DBMS_SCHEDULER) que retoma
-          eventos que ficaram em POLLING/TIMEOUT além da janela síncrona inicial.
+       2) RETRY_PENDING_EVENTS_P retoma eventos que ficaram em POLLING/TIMEOUT
+          além da janela síncrona inicial.
+       Nenhum dos dois é agendado via DBMS_SCHEDULER — a invocação periódica
+       (Concurrent Program, orquestração externa, chamada manual etc.) fica a
+       critério de cada instalação, fora do escopo deste package.
 
      Configuração:
        As URLs dos 3 ambientes (Homologação/Produção/QA) ficam fixas como
@@ -41,7 +44,7 @@ IS
        contrato real de consulta (ver docs/ARQUITETURA.md).
      ========================================================================== */
 
-  gc_module_name CONSTANT VARCHAR2(30) := 'XXISV_EVT_COMPLIANCE_PKG';
+  gc_module_name CONSTANT VARCHAR2(30) := 'XXISV_CSF_EVT_COMPLIANCE_PKG';
 
   -- Códigos de evento suportados nesta fase
   gc_evt_cancelamento     CONSTANT VARCHAR2(6) := '110001';
@@ -55,20 +58,22 @@ IS
   -- Erros de execução (config incompleta, evento não mapeado, falha HTTP,
   -- header não encontrado etc.) são sinalizados via RAISE_APPLICATION_ERROR
   -- com códigos ORA-20002 a ORA-20008 — ver registro completo no início do
-  -- package body (xxisv_evt_compliance_pkg.pkb), com o código e a mensagem
-  -- de cada um. Não há exceções nomeadas públicas: os SQLCODE/SQLERRM já
-  -- carregam contexto suficiente para log e troubleshooting.
+  -- package body (xxisv_csf_evt_compliance_pkg.pkb), com o código e a
+  -- mensagem de cada um. Não há exceções nomeadas públicas: os
+  -- SQLCODE/SQLERRM já carregam contexto suficiente para log e
+  -- troubleshooting.
 
   -- --------------------------------------------------------------------------
-  -- Job principal: varre notificações pendentes e processa cada evento novo
-  -- (envio + espera limitada pelo status), no ambiente configurado via
-  -- FND_LOOKUP_VALUES (ver get_config_f no body).
+  -- Entrada principal: varre notificações pendentes e processa cada evento
+  -- novo (envio + espera limitada pelo status), no ambiente configurado via
+  -- FND_LOOKUP_VALUES (ver get_config_f no body). Invocação periódica é
+  -- responsabilidade de quem chama (não há job/scheduler neste package).
   -- --------------------------------------------------------------------------
   PROCEDURE process_pending_events_p;
 
   -- --------------------------------------------------------------------------
-  -- Job de retomada: eventos que ficaram em POLLING/TIMEOUT/ERROR transitório
-  -- além da janela síncrona do envio original.
+  -- Entrada de retomada: eventos que ficaram em POLLING/TIMEOUT/ERROR
+  -- transitório além da janela síncrona do envio original.
   -- --------------------------------------------------------------------------
   PROCEDURE retry_pending_events_p;
 
@@ -79,5 +84,5 @@ IS
     p_event_header_id IN NUMBER
   );
 
-END xxisv_evt_compliance_pkg;
+END xxisv_csf_evt_compliance_pkg;
 /

@@ -17,8 +17,9 @@ Compliance chamar de volta.
    (EVENT_NAME = 'oracle.apps.cll.event_headers', PARAMETER_VALUE1 = EVENT_HEADER_ID)
         │
         ▼
-2. XXISV_EVT_SEND_JOB (DBMS_SCHEDULER, a cada 5 min)
-   -> XXISV_EVT_COMPLIANCE_PKG.PROCESS_PENDING_EVENTS_P
+2. XXISV_CSF_EVT_COMPLIANCE_PKG.PROCESS_PENDING_EVENTS_P
+   (invocado pelo mecanismo de agendamento de cada instalação — não há
+   job/DBMS_SCHEDULER neste package, ver "Pré-requisitos de infraestrutura")
         │  lê CLL_F255_EVENT_HEADERS_V / _LINES_V / _TAX_LINES_V
         │  chama CLL_F255_RT_EVENTS_PUB.return_status_p (status = IN PROCESS)
         │  monta o JSON do leiaute Compliance e faz POST via UTL_HTTP
@@ -36,8 +37,8 @@ Compliance chamar de volta.
    │resolvido │ não resolvido dentro da janela
    ▼          ▼
 CLL_F255_RT_  fica em TIMEOUT/POLLING;
-EVENTS_PUB.   XXISV_EVT_RETRY_JOB (a cada 10 min)
-return_status_p  -> RETRY_PENDING_EVENTS_P tenta de novo
+EVENTS_PUB.   próxima invocação de
+return_status_p  RETRY_PENDING_EVENTS_P tenta de novo
 (APPROVED/CANCELLED/ERROR + protocolo)
 ```
 
@@ -66,11 +67,18 @@ desta primeira entrega.
 sql/
   ddl/       tabelas de apoio (controle, log HTTP) + grants
   acl/       ACL de rede (DBMS_NETWORK_ACL_ADMIN) para saída HTTPS
-  packages/  XXISV_EVT_COMPLIANCE_PKG (spec + body)
-  jobs/      DBMS_SCHEDULER (envio + retry)
+  packages/  XXISV_CSF_EVT_COMPLIANCE_PKG (spec + body)
   seed/      valores a cadastrar em FND_LOOKUP_VALUES (sem segredos reais)
 docs/        documentos de origem (Oracle e Compliance) + esta arquitetura
 ```
+
+Todos os objetos criados no schema XXISV para esta integração usam o prefixo
+`XXISV_CSF_` (tabelas, índices, constraints e o package), identificando-os
+como pertencentes ao parceiro **Compliance Soluções Fiscais**. Não há
+job/`DBMS_SCHEDULER` neste repositório — `PROCESS_PENDING_EVENTS_P` e
+`RETRY_PENDING_EVENTS_P` são pontos de entrada; a invocação periódica
+(Concurrent Program, orquestração externa, chamada manual etc.) é
+responsabilidade de cada instalação.
 
 ### Configuração — `FND_LOOKUP_VALUES`
 
@@ -96,18 +104,19 @@ intervalos de polling (`gc_http_timeout_sec`, `gc_poll_interval_sec`,
 
 **ASSUNÇÃO:** os nomes de `LOOKUP_CODE` acima seguem a mesma convenção do
 exemplo fornecido (`WALLET_PATH`, `WALLET_PASSWORD`); ajustar `gc_lk_cd`,
-`gc_lk_hash`, `gc_lk_ambiente` em `xxisv_evt_compliance_pkg.pkb` se os códigos
-já cadastrados forem diferentes.
+`gc_lk_hash`, `gc_lk_ambiente` em `xxisv_csf_evt_compliance_pkg.pkb` se os
+códigos já cadastrados forem diferentes.
 
 ### Tabelas de apoio (schema XXISV)
 
-- **XXISV_EVT_CONTROL** — 1 linha por `EVENT_HEADER_ID` processado: status
-  local, protocolo, erros, tentativas. É a fonte da verdade para o job de
-  retry e para auditoria — as tabelas nativas `CLL_F255_*` não são alteradas.
-- **XXISV_EVT_HTTP_LOG** — auditoria de toda chamada HTTP (request/response),
+- **XXISV_CSF_EVT_CONTROL** — 1 linha por `EVENT_HEADER_ID` processado: status
+  local, protocolo, erros, tentativas. É a fonte da verdade para
+  `RETRY_PENDING_EVENTS_P` e para auditoria — as tabelas nativas `CLL_F255_*`
+  não são alteradas.
+- **XXISV_CSF_EVT_HTTP_LOG** — auditoria de toda chamada HTTP (request/response),
   necessária para troubleshooting e como evidência de homologação.
 
-### Package `XXISV_EVT_COMPLIANCE_PKG`
+### Package `XXISV_CSF_EVT_COMPLIANCE_PKG`
 
 - `PROCESS_PENDING_EVENTS_P` — varre notificações novas, envia e aguarda o
   status dentro da mesma chamada (ver "Como funciona a espera pelo status"
@@ -120,9 +129,10 @@ já cadastrados forem diferentes.
 ## Como funciona a espera pelo status
 
 Foi pedido que o próprio envio já tentasse capturar o status processado, sem
-depender só de um job separado. Como a API da Compliance é **assíncrona por
-desenho** (o `POST` devolve HTTP 202 confirmando apenas a publicação no
-RabbitMQ — "não confirma persistência Oracle", com filas de retry de até
+depender só de uma nova execução de `RETRY_PENDING_EVENTS_P`. Como a API da
+Compliance é **assíncrona por desenho** (o `POST` devolve HTTP 202 confirmando
+apenas a publicação no RabbitMQ — "não confirma persistência Oracle", com
+filas de retry de até
 300s antes da DLQ), não é possível "segurar" a mesma conexão HTTP até a
 aprovação da SEFAZ. A solução implementada:
 
@@ -133,9 +143,9 @@ aprovação da SEFAZ. A solução implementada:
    `poll_max_wait_sec`, padrão 90s) tentando consultar o status.
 3. Se resolver dentro da janela, `return_status_p` já é chamado com o status
    final (APPROVED/CANCELLED/ERROR) na mesma execução.
-4. Se não resolver, o evento fica marcado `TIMEOUT` em `XXISV_EVT_CONTROL` e o
-   job `XXISV_EVT_RETRY_JOB` continua tentando periodicamente, sem travar a
-   sessão do job de envio.
+4. Se não resolver, o evento fica marcado `TIMEOUT` em `XXISV_CSF_EVT_CONTROL`
+   e cada nova execução de `RETRY_PENDING_EVENTS_P` continua tentando, sem
+   travar a sessão do envio original.
 
 ## Pontos em aberto (validar antes de produção)
 
@@ -148,9 +158,10 @@ aprovação da SEFAZ. A solução implementada:
      "protocolo": "...", "protocoloCancelamento": "...",
      "codigoErro": "...", "mensagemErro": "..." }
    ```
-   Sem esse endpoint confirmado pela Compliance, `XXISV_EVT_SEND_JOB` envia o
-   evento e marca `IN_PROCESS`, mas nunca vai conseguir avançar sozinho para
-   `APPROVED/CANCELLED/ERROR` — os eventos ficam represados em `TIMEOUT`.
+   Sem esse endpoint confirmado pela Compliance, `PROCESS_PENDING_EVENTS_P`
+   envia o evento e marca `IN_PROCESS`, mas nunca vai conseguir avançar
+   sozinho para `APPROVED/CANCELLED/ERROR` — os eventos ficam represados em
+   `TIMEOUT`.
 2. **Distinção entre `vIbs/vCbs` e `vIbsEstornado/vCbsEstornado` (eventos
    112130/211124).** `EBS_RT_Eventos_Mapping_ISV.xlsx` mapeia os dois pares de
    campos para a mesma coluna `CLL_F255_EVENT_TAX_LINES_V.TAX_AMOUNT`,
@@ -184,12 +195,11 @@ aprovação da SEFAZ. A solução implementada:
 
 ## Pré-requisitos de infraestrutura
 
-- Deploy, nesta ordem: `sql/ddl/01_xxisv_evt_control.sql`,
-  `sql/ddl/02_xxisv_evt_http_log.sql`, `sql/ddl/03_grants.sql`,
+- Deploy, nesta ordem: `sql/ddl/01_xxisv_csf_evt_control.sql`,
+  `sql/ddl/02_xxisv_csf_evt_http_log.sql`, `sql/ddl/03_grants.sql`,
   `sql/acl/01_setup_network_acl.sql`, `sql/packages/*.pks` depois `*.pkb`,
-  cadastro dos `LOOKUP_CODE` de `sql/seed/seed_lookup_values.sql` (com `CD`/
-  `HASH` reais, preferencialmente pela tela de Lookups do EBS), e por fim
-  `sql/jobs/setup_scheduler_jobs.sql`.
+  e por fim o cadastro dos `LOOKUP_CODE` de `sql/seed/seed_lookup_values.sql`
+  (com `CD`/`HASH` reais, preferencialmente pela tela de Lookups do EBS).
 - Oracle Wallet configurado para TLS de saída se os certificados dos hosts
   `*.compliancefiscal.com.br` não estiverem na cadeia de confiança padrão do
   banco (caminho/senha lidos de `WALLET_PATH`/`WALLET_PASSWORD` na mesma
@@ -197,10 +207,11 @@ aprovação da SEFAZ. A solução implementada:
 - Usuário de integração `XXISV` com os grants de `sql/ddl/03_grants.sql` —
   manter o princípio de menor privilégio (somente SELECT nas views e EXECUTE
   no `CLL_F255_RT_EVENTS_PUB`, sem DML nas tabelas nativas da Localização).
-- Jobs `XXISV_EVT_SEND_JOB` / `XXISV_EVT_RETRY_JOB` ficam `enabled => FALSE`
-  por padrão — habilitar só após validar os pontos em aberto acima e rodar ao
-  menos um ciclo completo em homologação (ver roteiro de cenários na Cartilha,
-  páginas 10-22).
+- Não há job/`DBMS_SCHEDULER` neste repositório. `PROCESS_PENDING_EVENTS_P` e
+  `RETRY_PENDING_EVENTS_P` só devem passar a ser invocadas periodicamente
+  (pelo mecanismo de agendamento escolhido em cada instalação) depois de
+  validar os pontos em aberto acima e rodar ao menos um ciclo completo em
+  homologação (ver roteiro de cenários na Cartilha, páginas 10-22).
 
 ## Referências
 

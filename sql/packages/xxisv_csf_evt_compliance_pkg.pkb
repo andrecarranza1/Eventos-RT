@@ -1,4 +1,4 @@
-CREATE OR REPLACE PACKAGE BODY xxisv.xxisv_evt_compliance_pkg
+CREATE OR REPLACE PACKAGE BODY xxisv.xxisv_csf_evt_compliance_pkg
 IS
 
   -- Se a rede exigir proxy HTTP de saída para a internet, preencher aqui e
@@ -53,7 +53,7 @@ IS
   --   -20005  process_one_event_p / retry_one_event_p  configuração incompleta em FND_LOOKUP_VALUES
   --   -20006  get_config_f                          valor de AMBIENTE não reconhecido na lookup
   --   -20007  build_payload_f                       código de evento fora do escopo mapeado
-  --   -20008  retry_one_event_p                     XXISV_EVT_CONTROL não encontrado para o evento
+  --   -20008  retry_one_event_p                     XXISV_CSF_EVT_CONTROL não encontrado para o evento
   -- --------------------------------------------------------------------------
 
   TYPE t_config_rec IS RECORD (
@@ -106,7 +106,7 @@ IS
     WHERE  n.event_name = 'oracle.apps.cll.event_headers'
     AND    NOT EXISTS (
              SELECT 1
-             FROM   xxisv_evt_control c
+             FROM   xxisv_csf_evt_control c
              WHERE  c.event_header_id = TO_NUMBER(n.parameter_value1)
            );
 
@@ -178,7 +178,7 @@ IS
   ) IS
     PRAGMA AUTONOMOUS_TRANSACTION;
   BEGIN
-    INSERT INTO xxisv_evt_http_log (
+    INSERT INTO xxisv_csf_evt_http_log (
       event_header_id, call_type, request_url, request_body,
       http_status_code, response_body, error_message
     ) VALUES (
@@ -287,7 +287,7 @@ IS
   -- ==========================================================================
   -- http_call_f
   -- Executa a chamada HTTP (POST de envio ou GET de consulta) via UTL_HTTP e
-  -- registra o resultado em XXISV_EVT_HTTP_LOG.
+  -- registra o resultado em XXISV_CSF_EVT_HTTP_LOG.
   -- ==========================================================================
   FUNCTION http_call_f (
     p_config          IN t_config_rec,
@@ -646,9 +646,10 @@ IS
   -- Compliance publicar o contrato real) com um contrato de resposta
   -- assumido; ajustar assim que confirmado.
   --
-  -- Falha ao consultar/parsear não deve interromper o job (x_resolved fica
-  -- FALSE e o evento é retomado depois pelo job de retry); mas é logada em
-  -- XXISV_EVT_HTTP_LOG para dar visibilidade ao suporte — sem isso, um
+  -- Falha ao consultar/parsear não deve interromper o processamento
+  -- (x_resolved fica FALSE e o evento é retomado depois em uma nova execução
+  -- de RETRY_PENDING_EVENTS_P); mas é logada em
+  -- XXISV_CSF_EVT_HTTP_LOG para dar visibilidade ao suporte — sem isso, um
   -- contrato de resposta quebrado faria os eventos ficarem represados em
   -- TIMEOUT sem nenhuma pista do motivo.
   -- ==========================================================================
@@ -726,7 +727,7 @@ IS
     p_error_msg        IN VARCHAR2 DEFAULT NULL
   ) IS
   BEGIN
-    MERGE INTO xxisv_evt_control c
+    MERGE INTO xxisv_csf_evt_control c
     USING (SELECT p_header.event_header_id AS event_header_id FROM dual) src
     ON (c.event_header_id = src.event_header_id)
     WHEN MATCHED THEN UPDATE SET
@@ -757,8 +758,8 @@ IS
   -- ==========================================================================
   -- apply_resolution_p
   -- Traduz o resultado de poll_event_status_p em status final no EBS
-  -- (update_ebs_status_p) e em XXISV_EVT_CONTROL (upsert_control_p) — ou, se
-  -- não resolvido, marca TIMEOUT para o job de retry tentar depois. Ponto
+  -- (update_ebs_status_p) e em XXISV_CSF_EVT_CONTROL (upsert_control_p) — ou, se
+  -- não resolvido, marca TIMEOUT para RETRY_PENDING_EVENTS_P tentar depois. Ponto
   -- único usado tanto pelo envio (process_one_event_p) quanto pela retomada
   -- (retry_one_event_p), para as duas rotinas nunca divergirem nessa regra.
   -- ==========================================================================
@@ -797,7 +798,7 @@ IS
   -- Envia um evento e aguarda, de forma limitada (poll_max_wait_sec), pelo
   -- retorno de processamento — conforme solicitado: a própria rotina de envio
   -- tenta capturar o status já processado antes de devolver o controle.
-  -- Se não resolver dentro da janela, o evento fica em TIMEOUT para o job
+  -- Se não resolver dentro da janela, o evento fica em TIMEOUT para
   -- RETRY_PENDING_EVENTS_P retomar depois.
   -- ==========================================================================
   PROCEDURE process_one_event_p (
@@ -907,7 +908,7 @@ IS
   ) IS
     l_config          t_config_rec;
     l_header          c_header%ROWTYPE;
-    l_ctrl            xxisv_evt_control%ROWTYPE;
+    l_ctrl            xxisv_csf_evt_control%ROWTYPE;
     l_resolved        BOOLEAN;
     l_status_msg      VARCHAR2(30);
     l_error_code      VARCHAR2(20);
@@ -918,11 +919,11 @@ IS
     l_config := get_config_f;
 
     BEGIN
-      SELECT * INTO l_ctrl FROM xxisv_evt_control WHERE event_header_id = p_event_header_id;
+      SELECT * INTO l_ctrl FROM xxisv_csf_evt_control WHERE event_header_id = p_event_header_id;
     EXCEPTION
       WHEN NO_DATA_FOUND THEN
         RAISE_APPLICATION_ERROR(-20008,
-          gc_module_name || ': XXISV_EVT_CONTROL não encontrado para EVENT_HEADER_ID: ' || p_event_header_id);
+          gc_module_name || ': XXISV_CSF_EVT_CONTROL não encontrado para EVENT_HEADER_ID: ' || p_event_header_id);
     END;
 
     OPEN c_header(p_event_header_id);
@@ -976,7 +977,7 @@ IS
   BEGIN
     FOR r IN (
       SELECT event_header_id
-      FROM   xxisv_evt_control
+      FROM   xxisv_csf_evt_control
       WHERE  local_status IN ('TIMEOUT', 'POLLING')
       ORDER  BY last_attempt_date
     ) LOOP
@@ -991,5 +992,5 @@ IS
     END LOOP;
   END retry_pending_events_p;
 
-END xxisv_evt_compliance_pkg;
+END xxisv_csf_evt_compliance_pkg;
 /

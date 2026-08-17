@@ -1,14 +1,14 @@
 -- ============================================================================
 -- Valores a cadastrar em FND_LOOKUP_VALUES para o package
--- XXISV_EVT_COMPLIANCE_PKG, sob o LOOKUP_TYPE já existente no XXISV:
+-- XXISV_CSF_EVT_COMPLIANCE_PKG, sob o LOOKUP_TYPE já existente no XXISV:
 -- 'XXISV_CSF_MULTORG_SIC' (mesmo usado hoje para WALLET_PATH/WALLET_PASSWORD).
 --
--- LOOKUP_CODE esperado por get_config_f (xxisv_evt_compliance_pkg.pkb) —
+-- LOOKUP_CODE esperado por get_config_f (xxisv_csf_evt_compliance_pkg.pkb) —
 -- ASSUNÇÃO de nomenclatura, ajustar os LOOKUP_CODE reais se forem outros:
 --   AMBIENTE          -> 'HOMOLOGACAO' | 'PRODUCAO' | 'QA'
 --                        (define, nesta instância EBS, qual dos 3 endpoints
 --                        fixos no package deve ser usado — ver gc_url_* em
---                        xxisv_evt_compliance_pkg.pkb)
+--                        xxisv_csf_evt_compliance_pkg.pkb)
 --   CD                -> valor do header HTTP "cd" (código da mult-organização)
 --   HASH              -> valor do header HTTP "hash"
 --   WALLET_PATH       -> já cadastrado (reaproveitado do padrão existente)

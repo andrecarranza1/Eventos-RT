@@ -27,14 +27,15 @@ END;
 /
 
 -- Se a rede corporativa exigir proxy HTTP para saída à internet, configurar
--- UTL_HTTP.SET_PROXY no package (ver g_http_proxy em xxisv_evt_compliance_pkg.pkb)
+-- UTL_HTTP.SET_PROXY no package (ver g_http_proxy em xxisv_csf_evt_compliance_pkg.pkb)
 -- e liberar também o privilégio 'http_proxy' acima (já incluso).
 
 -- TLS: se os certificados dos hosts da Compliance Fiscal não estiverem na
 -- cadeia de confiança padrão do banco, é necessário criar/alimentar um Oracle
--- Wallet (orapki) com a CA correspondente e apontar XXISV_EVT_CONFIG.WALLET_PATH
--- / WALLET_PASSWORD para ele. UTL_HTTP.SET_WALLET é chamado pelo package antes
--- de cada requisição HTTPS.
+-- Wallet (orapki) com a CA correspondente e cadastrar o caminho/senha nos
+-- LOOKUP_CODE WALLET_PATH/WALLET_PASSWORD (FND_LOOKUP_VALUES, LOOKUP_TYPE
+-- XXISV_CSF_MULTORG_SIC — ver sql/seed/seed_lookup_values.sql). UTL_HTTP.SET_WALLET
+-- é chamado pelo package antes de cada requisição HTTPS.
 
 -- Validação:
 -- SELECT host, lower_port, upper_port, ace.* FROM dba_network_acls a, dba_network_acl_privileges p
