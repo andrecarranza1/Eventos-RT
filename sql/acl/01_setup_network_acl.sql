@@ -36,6 +36,43 @@ END;
 -- LOOKUP_CODE WALLET_PATH/WALLET_PASSWORD (FND_LOOKUP_VALUES, LOOKUP_TYPE
 -- XXISV_CSF_MULTORG_SIC — ver sql/seed/seed_lookup_values.sql). UTL_HTTP.SET_WALLET
 -- é chamado pelo package antes de cada requisição HTTPS.
+--
+-- Passo a passo (executar no servidor de banco, como usuário OS "oracle" ou
+-- equivalente com permissão de escrita no diretório do wallet):
+--
+-- 1) Obter o certificado da CA que assina os hosts da Compliance Fiscal.
+--    Preferir pedir formalmente o certificado (CA raiz/intermediária, .pem
+--    ou .cer) ao time da Compliance Soluções Fiscais — evita depender de
+--    extração manual e garante que é a cadeia correta.
+--    Alternativa/validação rápida: extrair diretamente do host via openssl
+--    (ajustar o host para o ambiente desejado — apphml/app/qa):
+--      openssl s_client -connect app.compliancefiscal.com.br:443 -showcerts \
+--        </dev/null 2>/dev/null \
+--        | openssl x509 -outform PEM > /tmp/compliancefiscal_ca.pem
+--    (com -showcerts é possível ver toda a cadeia; se o servidor apresentar
+--    intermediária + raiz, considerar importar ambas no wallet).
+--
+-- 2) Criar o wallet (ajustar o caminho conforme o padrão de filesystem da
+--    instalação; não usar -auto_login, pois o package informa a senha
+--    explicitamente via WALLET_PASSWORD em cada UTL_HTTP.SET_WALLET):
+--      orapki wallet create -wallet /u01/app/oracle/wallets/xxisv_csf -pwd 'SENHA_FORTE_AQUI'
+--
+-- 3) Importar a CA obtida no passo 1 como certificado confiável:
+--      orapki wallet add -wallet /u01/app/oracle/wallets/xxisv_csf \
+--        -trusted_cert -cert /tmp/compliancefiscal_ca.pem -pwd 'SENHA_FORTE_AQUI'
+--
+-- 4) Conferir o conteúdo do wallet:
+--      orapki wallet display -wallet /u01/app/oracle/wallets/xxisv_csf -pwd 'SENHA_FORTE_AQUI'
+--
+-- 5) Restringir permissões do diretório/arquivos do wallet ao usuário OS do
+--    banco (ex.: chmod 700 no diretório, owner oracle:oinstall) — o wallet
+--    guarda a CA confiável, mas ainda assim não deve ficar acessível a
+--    outros usuários do sistema operacional.
+--
+-- 6) Cadastrar em FND_LOOKUP_VALUES (LOOKUP_TYPE XXISV_CSF_MULTORG_SIC):
+--      WALLET_PATH     -> file:/u01/app/oracle/wallets/xxisv_csf   (prefixo "file:" obrigatório)
+--      WALLET_PASSWORD -> a mesma senha usada nos passos 2/3
+--    (ver sql/seed/seed_lookup_values.sql).
 
 -- Validação:
 -- SELECT host, lower_port, upper_port, ace.* FROM dba_network_acls a, dba_network_acl_privileges p
